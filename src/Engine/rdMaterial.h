@@ -5,6 +5,13 @@
 #include "globals.h"
 #include "Win95/stdVBuffer.h"
 
+// Added: bits of rdTexture.alpha_en. Stock code only ever tests bit 0.
+#define RDMATERIAL_ALPHA_EN         (1) // texture has alpha (stock meaning: 16-bit ARGB1555 surface)
+#define RDMATERIAL_ALPHA_4444       (2) // 16-bit texture carries 4 bits of alpha (Indy style, alpha_bpp == 4)
+#define RDMATERIAL_ALPHA_RGBA_ORDER (4) // pixel order is RGBA (Indy) rather than ARGB (JK)
+#define RDMATERIAL_ALPHA_EMISSIVE   (8) // 16-bit mat with transparent flag == 2: alpha channel is a glow mask, surface is opaque
+#define RDMATERIAL_ALPHA_MASK       (15)
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -265,7 +265,34 @@ int rdMaterial_LoadEntry_Common(char *mat_fpath, rdMaterial *material, int creat
         //printf("asdf %x %x\n", tex_numa, material->num_textures);
         rdroid_g_pHS->fileRead(mat_file_, &tex_header_1, sizeof(rdTextureHeader));
         texture = &material->textures[tex_numa];
-        texture->alpha_en = tex_header_1.alpha_en;
+        texture->alpha_en = tex_header_1.alpha_en & 1; // Added: upper bits hold 16-bit alpha format flags
+
+        // Added: Indiana Jones style 16-bit alpha mats. No transparent flag; alpha is described by
+        // the header's alpha_bpp/alpha_sh.  bit0 = alpha, bit1 = 4444, bit2 = RGBA pixel order.
+        // Added: transparent flag == 2 on a 16-bit mat = emissive mode (alpha is a glow mask, not transparency)
+        int emissive_mode = (tex_header_1.alpha_en == 2) && mat_header.texFormat.is16bit;
+        if (mat_header.texFormat.is16bit)
+        {
+            uint32_t a_bpp = mat_header.texFormat.unk_40; // alpha_bpp
+            uint32_t a_sh = mat_header.texFormat.unk_44;  // alpha_sh
+            if (a_bpp == 4 && mat_header.texFormat.r_bits == 4 && mat_header.texFormat.g_bits == 4 && mat_header.texFormat.b_bits == 4)
+            {
+                texture->alpha_en |= (emissive_mode ? 0 : RDMATERIAL_ALPHA_EN) | RDMATERIAL_ALPHA_4444;
+                if (a_sh == 0) texture->alpha_en |= RDMATERIAL_ALPHA_RGBA_ORDER; // Indy: R12 G8 B4 A0, JK: A12 R8 G4 B0
+            }
+            else if (a_bpp == 1 && a_sh == 0 && mat_header.texFormat.r_bits == 5 && mat_header.texFormat.g_bits == 5 && mat_header.texFormat.b_bits == 5)
+            {
+                texture->alpha_en |= (emissive_mode ? 0 : RDMATERIAL_ALPHA_EN) | RDMATERIAL_ALPHA_RGBA_ORDER; // Indy RGBA5551
+            }
+            // Added: emissive mode needs an alpha-carrying format; JK-layout ARGB1555 is only recognised in this mode
+            if (emissive_mode)
+            {
+                if (a_bpp == 1 && a_sh == 15 && mat_header.texFormat.r_bits == 5 && mat_header.texFormat.g_bits == 5 && mat_header.texFormat.b_bits == 5)
+                    texture->alpha_en |= RDMATERIAL_ALPHA_EMISSIVE;
+                else if (texture->alpha_en & (RDMATERIAL_ALPHA_4444 | RDMATERIAL_ALPHA_RGBA_ORDER))
+                    texture->alpha_en |= RDMATERIAL_ALPHA_EMISSIVE;
+            }
+        }
         texture->unk_0c = tex_header_1.unk_0c;
         texture->width_bitcnt = stdCalcBitPos(tex_header_1.width);
         texture->width_minus_1 = tex_header_1.width - 1;
@@ -490,7 +517,7 @@ LABEL_22:
             surface->texture_loaded = 0;
 
 #if defined(TARGET_CAN_JKGM)
-            jkgm_populate_shortcuts(mipmap, surface, material, texture->alpha_en & 1, j, i);
+            jkgm_populate_shortcuts(mipmap, surface, material, texture->alpha_en & RDMATERIAL_ALPHA_MASK, j, i);
 #endif
         }
     }
@@ -835,14 +862,14 @@ int rdMaterial_AddToTextureCache(rdMaterial *pMaterial, rdTexture *texture, int 
         }
 #ifdef SDL2_RENDER
 #if defined(TARGET_CAN_JKGM)
-        else if (jkgm_std3D_AddToTextureCache(mipmap, surface, texture->alpha_en & 1, no_alpha, pMaterial, cel_idx))
+        else if (jkgm_std3D_AddToTextureCache(mipmap, surface, texture->alpha_en & RDMATERIAL_ALPHA_MASK, no_alpha, pMaterial, cel_idx))
         {
             //printf("rdmat Init %s %x %x\n", pMaterial->mat_fpath, surface->texture_id, std3D_loadedTexturesAmt);
             return 1;
         }
 #endif
 #endif
-        else if (std3D_AddToTextureCache(mipmap, surface, texture->alpha_en & 1, no_alpha))
+        else if (std3D_AddToTextureCache(mipmap, surface, texture->alpha_en & RDMATERIAL_ALPHA_MASK, no_alpha))
         {
             //printf("rdmat Init %s %x %x\n", pMaterial->mat_fpath, surface->texture_id, std3D_loadedTexturesAmt);
             return 1;
@@ -859,14 +886,14 @@ int rdMaterial_AddToTextureCache(rdMaterial *pMaterial, rdTexture *texture, int 
         }
 #ifdef SDL2_RENDER
 #if defined(TARGET_CAN_JKGM)
-        else if (jkgm_std3D_AddToTextureCache(mipmap, surface, texture->alpha_en & 1, no_alpha, pMaterial, cel_idx))
+        else if (jkgm_std3D_AddToTextureCache(mipmap, surface, texture->alpha_en & RDMATERIAL_ALPHA_MASK, no_alpha, pMaterial, cel_idx))
         {
             //printf("rdmat Init %s %x %x\n", pMaterial->mat_fpath, surface->texture_id, std3D_loadedTexturesAmt);
             return 1;
         }
 #endif
 #endif
-        else if (std3D_AddToTextureCache(mipmap, surface, texture->alpha_en & 1, 0))
+        else if (std3D_AddToTextureCache(mipmap, surface, texture->alpha_en & RDMATERIAL_ALPHA_MASK, 0))
         {
             //printf("rdmat Init %s %x %x\n", pMaterial->mat_fpath, surface->texture_id, std3D_loadedTexturesAmt);
             return 1;

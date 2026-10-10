@@ -1,4 +1,5 @@
 #include "Platform/std3D.h"
+#include "Engine/rdMaterial.h"
 
 #include "Raster/rdCache.h"
 #include "Raster/rdZRaster.h"
@@ -108,6 +109,11 @@ int init_once = 0;
 GLuint programDefault, programMenu;
 GLint attribute_coord3d, attribute_v_color, attribute_v_light, attribute_v_uv, attribute_v_norm;
 GLint uniform_mvp, uniform_tex, uniform_texEmiss, uniform_displacement_map, uniform_tex_mode, uniform_blend_mode, uniform_worldPalette, uniform_worldPaletteLights;
+GLint uniform_tex_partial_alpha;
+GLint uniform_tex_emissive_alpha;
+GLint uniform_emissive16_params;
+// Glow of 16-bit emissive mats is divided by this when bloom is on (post pass sums ~5.8x on flat areas). Raise = dimmer glow, less bloom blow-out.
+#define EMISSIVE16_BLOOM_DIV (4.0f)
 GLint uniform_tint, uniform_filter, uniform_fade, uniform_add, uniform_emissiveFactor, uniform_albedoFactor;
 GLint uniform_light_mult, uniform_displacement_factor, uniform_iResolution;
 
@@ -491,6 +497,9 @@ int init_resources()
     uniform_displacement_map = std3D_tryFindUniform(programDefault, "displacement_map");
     uniform_tex_mode = std3D_tryFindUniform(programDefault, "tex_mode");
     uniform_blend_mode = std3D_tryFindUniform(programDefault, "blend_mode");
+    uniform_tex_partial_alpha = std3D_tryFindUniform(programDefault, "tex_partial_alpha");
+    uniform_tex_emissive_alpha = std3D_tryFindUniform(programDefault, "tex_emissive_alpha");
+    uniform_emissive16_params = std3D_tryFindUniform(programDefault, "emissive16_params");
     uniform_tint = std3D_tryFindUniform(programDefault, "colorEffects_tint");
     uniform_filter = std3D_tryFindUniform(programDefault, "colorEffects_filter");
     uniform_fade = std3D_tryFindUniform(programDefault, "colorEffects_fade");
@@ -2485,6 +2494,8 @@ void std3D_DoTex(rdDDrawSurface* tex, rdTri* tri, int tris_left)
         glBindTexture(GL_TEXTURE_2D, blank_tex_white);
         glUniform1i(uniform_tex_mode, TEX_MODE_TEST);
         glUniform1i(uniform_blend_mode, 2);
+        glUniform1i(uniform_tex_partial_alpha, 0);
+        glUniform1i(uniform_tex_emissive_alpha, 0);
         return;
     }
     int tex_id = tex->texture_id;
@@ -2542,11 +2553,18 @@ void std3D_DoTex(rdDDrawSurface* tex, rdTri* tri, int tris_left)
         glUniform1i(uniform_tex_mode, tex->is_16bit ? TEX_MODE_16BPP : TEX_MODE_WORLDPAL);
     else
         glUniform1i(uniform_tex_mode, tex->is_16bit ? TEX_MODE_BILINEAR_16BPP : TEX_MODE_BILINEAR);
+    glUniform1i(uniform_tex_partial_alpha, tex->alpha_partial);
+    glUniform1i(uniform_tex_emissive_alpha, tex->alpha_emissive);
+    glUniform2f(uniform_emissive16_params, (float)jkPlayer_gamma, jkPlayer_enableBloom ? EMISSIVE16_BLOOM_DIV : 1.0f);
     
      glActiveTexture(GL_TEXTURE0 + 0);
 
     if (tex_id == 0)
+    {
         glUniform1i(uniform_tex_mode, TEX_MODE_TEST);
+        glUniform1i(uniform_tex_partial_alpha, 0);
+        glUniform1i(uniform_tex_emissive_alpha, 0);
+    }
 }
 
 void std3D_DrawRenderList()
@@ -2636,6 +2654,9 @@ void std3D_DrawRenderList()
     
     glUniform1i(uniform_tex_mode, TEX_MODE_TEST);
     glUniform1i(uniform_blend_mode, 2);
+    
+    glUniform1i(uniform_tex_partial_alpha, 0);
+    glUniform1i(uniform_tex_emissive_alpha, 0);
     glActiveTexture(GL_TEXTURE0 + 4);
     glBindTexture(GL_TEXTURE_2D, blank_tex);
     glActiveTexture(GL_TEXTURE0 + 3);
@@ -3039,7 +3060,7 @@ int std3D_AddToTextureCache(tVBuffer *vbuf, rdDDrawSurface *texture, int is_alph
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
 
-    if (jkPlayer_enableTextureFilter && texture->is_16bit)
+    if (jkPlayer_enableTextureFilter && vbuf->format.format.is16bit)
     {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -3050,12 +3071,43 @@ int std3D_AddToTextureCache(tVBuffer *vbuf, rdDDrawSurface *texture, int is_alph
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     }
 
+    texture->alpha_emissive = (is_alpha_tex & RDMATERIAL_ALPHA_EMISSIVE) ? 1 : 0;
+    texture->alpha_partial = ((is_alpha_tex & RDMATERIAL_ALPHA_4444) && !texture->alpha_emissive) ? 1 : 0;
     if (vbuf->format.format.is16bit)
     {
         texture->is_16bit = 1;
 #if 1
         if (!is_alpha_tex)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, width, height, 0,  GL_RGB, GL_UNSIGNED_SHORT_5_6_5_REV, image_8bpp);
+        else if (is_alpha_tex & (RDMATERIAL_ALPHA_4444 | RDMATERIAL_ALPHA_RGBA_ORDER))
+        {
+            // Added: Indy style 16-bit alpha mats (ARGB4444 / RGBA4444 / RGBA5551).
+            // Repack to the layout the 16bpp shader path expects (it swaps R and B):
+            // GL "R" holds the texel's blue, GL "B" holds its red.
+            uint16_t* repacked = (uint16_t*)malloc((size_t)width * height * sizeof(uint16_t));
+            if (repacked)
+            {
+                for (uint32_t k = 0; k < width * height; k++)
+                {
+                    uint16_t v = image_16bpp[k];
+                    if (is_alpha_tex & RDMATERIAL_ALPHA_4444)
+                    {
+                        uint16_t a, r, g, b;
+                        if (is_alpha_tex & RDMATERIAL_ALPHA_RGBA_ORDER) { r = v >> 12; g = (v >> 8) & 0xF; b = (v >> 4) & 0xF; a = v & 0xF; }
+                        else                                            { a = v >> 12; r = (v >> 8) & 0xF; g = (v >> 4) & 0xF; b = v & 0xF; }
+                        repacked[k] = (b << 12) | (g << 8) | (r << 4) | a;
+                    }
+                    else // RGBA5551
+                    {
+                        uint16_t r = v >> 11, g = (v >> 6) & 0x1F, b = (v >> 1) & 0x1F, a = v & 1;
+                        repacked[k] = (b << 11) | (g << 6) | (r << 1) | a;
+                    }
+                }
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
+                             (is_alpha_tex & RDMATERIAL_ALPHA_4444) ? GL_UNSIGNED_SHORT_4_4_4_4 : GL_UNSIGNED_SHORT_5_5_5_1, repacked);
+                free(repacked);
+            }
+        }
         else
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,  GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, image_8bpp);
 #endif

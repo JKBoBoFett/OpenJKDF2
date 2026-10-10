@@ -28,6 +28,7 @@
 //    the modern shader pre-multiplies alpha, so additive/window blends may differ.
 
 #include "Platform/std3D.h"
+#include "Engine/rdMaterial.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -453,6 +454,20 @@ int std3D_AddToTextureCache(tVBuffer* vbuf, rdDDrawSurface* texture, int is_alph
                 b8 = std3D_Expand5((val >> 0)  & 0x1F);
                 a8 = 0xFF;
             }
+            else if (is_alpha_tex & RDMATERIAL_ALPHA_4444) // Added: Indy ARGB4444 / RGBA4444
+            {
+                uint8_t a4, r4, g4, b4;
+                if (is_alpha_tex & RDMATERIAL_ALPHA_RGBA_ORDER) { r4 = val >> 12; g4 = (val >> 8) & 0xF; b4 = (val >> 4) & 0xF; a4 = val & 0xF; }
+                else                                            { a4 = val >> 12; r4 = (val >> 8) & 0xF; g4 = (val >> 4) & 0xF; b4 = val & 0xF; }
+                a8 = a4 * 17; r8 = r4 * 17; g8 = g4 * 17; b8 = b4 * 17;
+            }
+            else if (is_alpha_tex & RDMATERIAL_ALPHA_RGBA_ORDER) // Added: Indy RGBA5551
+            {
+                a8 = (val & 1) ? 0xFF : 0x00;
+                r8 = std3D_Expand5((val >> 11) & 0x1F);
+                g8 = std3D_Expand5((val >> 6)  & 0x1F);
+                b8 = std3D_Expand5((val >> 1)  & 0x1F);
+            }
             else // RGB1555
             {
                 a8 = (val >> 15) ? 0xFF : 0x00;
@@ -462,7 +477,7 @@ int std3D_AddToTextureCache(tVBuffer* vbuf, rdDDrawSurface* texture, int is_alph
             }
             image_data[i] = (uint32_t)r8 | ((uint32_t)g8 << 8) | ((uint32_t)b8 << 16) | ((uint32_t)a8 << 24);
         }
-        glTexImage2D(GL_TEXTURE_2D, 0, is_alpha_tex ? GL_RGB5_A1 : GL_RGB5,
+        glTexImage2D(GL_TEXTURE_2D, 0, (is_alpha_tex & RDMATERIAL_ALPHA_4444) ? GL_RGBA4 : (is_alpha_tex ? GL_RGB5_A1 : GL_RGB5),
                      width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
         free(image_data);
     }

@@ -55,6 +55,11 @@ uniform sampler2D worldPaletteLights;
 uniform sampler2D displacement_map;
 uniform int tex_mode;
 uniform int blend_mode;
+uniform int tex_partial_alpha;
+uniform int tex_emissive_alpha;
+uniform vec2 emissive16_params; // x = r_gamma, y = divisor compensating the bloom/emissive post pass
+#define EMISSIVE16_STRENGTH (1.0)   // overall glow strength
+#define EMISSIVE16_MASK_CURVE (1.0) // 1.0 = linear in alpha; >1 makes low levels dimmer
 uniform vec3 colorEffects_tint;
 uniform vec3 colorEffects_filter;
 uniform float colorEffects_fade;
@@ -268,6 +273,7 @@ void main(void)
     vec4 palval = texture(worldPalette, vec2(index, 0.5));
     vec4 color_add = vec4(0.0, 0.0, 0.0, 1.0);
     vec4 color_add_emiss = vec4(0.0, 0.0, 0.0, 0.0);
+    float emis_mask = 0.0; // EMISSIVE16: glow mask from the alpha channel of 16-bit emissive mats
 
     if (tex_mode == TEX_MODE_TEST) {
         sampled_color = vec4(1.0, 1.0, 1.0, 1.0);
@@ -277,6 +283,7 @@ void main(void)
     )
     {
         sampled_color = vec4(sampled.b, sampled.g, sampled.r, sampled.a);
+        if (tex_emissive_alpha != 0) { emis_mask = sampled.a; sampled_color.a = 1.0; } // opaque; alpha is the glow mask
     }
     else if (tex_mode == TEX_MODE_WORLDPAL
 #ifndef CAN_BILINEAR_FILTER
@@ -342,6 +349,10 @@ void main(void)
     vec4 effectAdd_color = vec4(colorEffects_add.r, colorEffects_add.g, colorEffects_add.b, 0.0);
     
     main_color *= albedoFactor_copy;
+
+    // INDY_ALPHA_PREMUL: translucent pass blends as (ONE, ONE_MINUS_SRC_ALPHA), so rgb must be premultiplied
+    if (blend_mode == D3DBLEND_SRCALPHA && (tex_mode == TEX_MODE_16BPP || tex_mode == TEX_MODE_BILINEAR_16BPP))
+        main_color.rgb *= sampled_color.a;
     float should_write_normals = 1.0;
     float orig_alpha = main_color.a;
 
@@ -392,6 +403,21 @@ void main(void)
         color_add.b *= luma;
     }
 
+    // EMISSIVE16: glow = fullbright. Target colour = tex * (light + mask * (1 - light)); only the part lighting did not
+    // already provide goes into the emissive buffer. The post pass shows the buffers as pow(x, 1/gamma) separately and
+    // sums them, so solve for the buffer value in display space, then undo the post-pass gain.
+    if (emis_mask > 0.0)
+    {
+        float eg = max(emissive16_params.x, 0.01);
+        float ed = max(emissive16_params.y, 0.01);
+        vec3 lit = clamp(vertex_color.rgb, 0.0, 1.0);
+        float m = pow(emis_mask, EMISSIVE16_MASK_CURVE);
+        vec3 base_c = sampled_color.rgb * lit;
+        vec3 full_c = sampled_color.rgb * (lit + m * (vec3(1.0) - lit));
+        vec3 disp = max(pow(full_c, vec3(1.0 / eg)) - pow(base_c, vec3(1.0 / eg)), vec3(0.0));
+        color_add.rgb += pow(disp, vec3(eg)) * (EMISSIVE16_STRENGTH / ed);
+    }
+
     vec3 tint = normalize(colorEffects_tint + 1.0) * sqrt(3.0);
 
     color_add.r *= tint.r;
@@ -429,5 +455,8 @@ void main(void)
 
     fragColorPos = vec4(adjusted_coords.x, adjusted_coords.y, adjusted_coords.z, should_write_normals);
     fragColorNormal = vec4(face_normals, should_write_normals);
+    // SSAO_SKIP: 4-bit partial-alpha textures never write the SSAO G-buffer. Blend is (ONE, ONE_MINUS_SRC_ALPHA),
+    // so an all-zero output leaves what is behind the surface untouched.
+    if (tex_partial_alpha != 0) { fragColorPos = vec4(0.0); fragColorNormal = vec4(0.0); }
     gl_FragDepth = gl_FragCoord.z;
 }

@@ -1039,6 +1039,8 @@ typedef struct rdDDrawSurface
     int texture_id;
     int texture_loaded;
     int is_16bit;
+    int alpha_emissive; // Added: texture alpha channel is an emissive mask (transparent flag == 2)
+    int alpha_partial; // Added: texture has 4-bit partial alpha (RDMATERIAL_ALPHA_4444)
     uint32_t width;
     uint32_t height;
 
